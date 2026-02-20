@@ -25,25 +25,18 @@ with col4:
 if inventory_file and issuance_file and receipts_file and item_master_file:
 
     # -------------------------------
-    # ROBUST FILE LOADER (Cloud Safe)
+    # Robust File Loader
     # -------------------------------
     def load_file(f):
-        try:
-            if f.name.lower().endswith(".xlsx"):
-                return pd.read_excel(f)
-            elif f.name.lower().endswith(".csv"):
-                try:
-                    return pd.read_csv(f, encoding="utf-8")
-                except UnicodeDecodeError:
-                    try:
-                        return pd.read_csv(f, encoding="utf-8-sig")
-                    except UnicodeDecodeError:
-                        return pd.read_csv(f, encoding="latin1")
-            else:
-                st.error(f"Unsupported file type: {f.name}")
-                st.stop()
-        except Exception as e:
-            st.error(f"Error loading {f.name}: {e}")
+        if f.name.lower().endswith(".xlsx"):
+            return pd.read_excel(f)
+        elif f.name.lower().endswith(".csv"):
+            try:
+                return pd.read_csv(f, encoding="utf-8")
+            except:
+                return pd.read_csv(f, encoding="latin1")
+        else:
+            st.error(f"Unsupported file type: {f.name}")
             st.stop()
 
     inventory = load_file(inventory_file)
@@ -52,27 +45,24 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
     items = load_file(item_master_file)
 
     # -------------------------------
-    # 1️⃣b: Ensure numeric columns
+    # Numeric Cleanup
     # -------------------------------
-    numeric_cols_inventory = ["on_hand_qty"]
-    for col in numeric_cols_inventory:
+    for col in ["on_hand_qty"]:
         if col in inventory.columns:
-            inventory[col] = pd.to_numeric(inventory[col], errors='coerce').fillna(0)
+            inventory[col] = pd.to_numeric(inventory[col], errors="coerce").fillna(0)
 
-    numeric_cols_items = ["safety_stock","lead_time","MOQ","pack_size"]
-    for col in numeric_cols_items:
+    for col in ["safety_stock", "lead_time", "MOQ", "pack_size"]:
         if col in items.columns:
-            items[col] = pd.to_numeric(items[col], errors='coerce').fillna(0)
+            items[col] = pd.to_numeric(items[col], errors="coerce").fillna(0)
 
     for col in ["issued_qty"]:
         if col in issuance.columns:
-            issuance[col] = pd.to_numeric(issuance[col], errors='coerce').fillna(0)
+            issuance[col] = pd.to_numeric(issuance[col], errors="coerce").fillna(0)
 
     for col in ["qty"]:
         if col in receipts.columns:
-            receipts[col] = pd.to_numeric(receipts[col], errors='coerce').fillna(0)
+            receipts[col] = pd.to_numeric(receipts[col], errors="coerce").fillna(0)
 
-    # Ensure UOM is string
     for df in [inventory, issuance, receipts, items]:
         if "uom" in df.columns:
             df["uom"] = df["uom"].astype(str)
@@ -80,39 +70,19 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
     st.success("Files loaded successfully!")
 
     # -------------------------------
-    # 2️⃣ UOM Consistency Check (case-insensitive)
-    # -------------------------------
-    uom_mismatches = []
-    for item in items["item_id"].unique():
-        uoms = {}
-        uoms["item_master"] = items.loc[items["item_id"]==item, "uom"].iloc[0].upper()
-        if item in inventory["item_id"].values:
-            uoms["inventory"] = inventory.loc[inventory["item_id"]==item, "uom"].unique()[0].upper()
-        if item in issuance["item_id"].values:
-            uoms["issuance"] = issuance.loc[issuance["item_id"]==item, "uom"].unique()[0].upper()
-        if item in receipts["item_id"].values:
-            uoms["receipts"] = receipts.loc[receipts["item_id"]==item, "uom"].unique()[0].upper()
-        if len(set(uoms.values())) > 1:
-            uom_mismatches.append({"item_id": item, **uoms})
-
-    if uom_mismatches:
-        st.warning("⚠ UOM mismatches detected (case-insensitive). Review below:")
-        st.dataframe(pd.DataFrame(uom_mismatches))
-
-    # -------------------------------
-    # 3️⃣ Convert date columns
+    # Date Conversion
     # -------------------------------
     if "week_start" in issuance.columns:
-        issuance["week_start"] = pd.to_datetime(issuance["week_start"], errors='coerce')
+        issuance["week_start"] = pd.to_datetime(issuance["week_start"])
     if "week_start" in receipts.columns:
-        receipts["week_start"] = pd.to_datetime(receipts["week_start"], errors='coerce')
-
-    warehouses = inventory["warehouse"].unique()
+        receipts["week_start"] = pd.to_datetime(receipts["week_start"])
 
     # -------------------------------
-    # 4️⃣ Warehouse-Specific Item Master
+    # Item Master Validation
     # -------------------------------
-    required_cols = ["warehouse","item_id","description","safety_stock","lead_time","MOQ","pack_size","uom"]
+    required_cols = ["warehouse","item_id","description",
+                     "safety_stock","lead_time","MOQ","pack_size","uom"]
+
     missing = [c for c in required_cols if c not in items.columns]
     if missing:
         st.error(f"Missing required columns in Item Master: {missing}")
@@ -120,14 +90,14 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
 
     dupes = items[items.duplicated(subset=["warehouse","item_id"], keep=False)]
     if not dupes.empty:
-        st.error("Duplicate planning parameters found for warehouse-item combination:")
+        st.error("Duplicate warehouse-item combinations found.")
         st.dataframe(dupes)
         st.stop()
 
     items_dict = items.set_index(["warehouse","item_id"]).to_dict("index")
 
     # -------------------------------
-    # 5️⃣ Future Planning Weeks (Monday Start)
+    # Planning Horizon
     # -------------------------------
     today = pd.to_datetime(date.today())
     today_monday = today - pd.Timedelta(days=today.weekday())
@@ -135,161 +105,157 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
     time_buckets = [today_monday + timedelta(weeks=w) for w in range(num_weeks)]
 
     # -------------------------------
-    # 6️⃣ Initialize MRP Structures
+    # Pre-group Data (Performance Boost)
+    # -------------------------------
+    issuance_sorted = issuance.sort_values("week_start")
+
+    issuance_grouped = (
+        issuance_sorted
+        .groupby(["warehouse","item_id"])["issued_qty"]
+        .apply(list)
+        .to_dict()
+    )
+
+    receipts_grouped = (
+        receipts
+        .groupby(["warehouse","item_id","week_start"])["qty"]
+        .sum()
+        .to_dict()
+    )
+
+    inventory_grouped = (
+        inventory
+        .groupby(["warehouse","item_id"])["on_hand_qty"]
+        .sum()
+        .to_dict()
+    )
+
+    # -------------------------------
+    # Optimized MRP Engine
     # -------------------------------
     debug_rows = []
 
-    for wh in warehouses:
-        wh_inventory = inventory[inventory["warehouse"]==wh].set_index("item_id")["on_hand_qty"].to_dict()
-        wh_items = [item for (w,item) in items_dict.keys() if w==wh]
+    for (wh, item), params in items_dict.items():
 
-        for item in wh_items:
-            previous_s = wh_inventory.get(item,0)
-            params = items_dict.get((wh,item),{})
+        previous_s = float(inventory_grouped.get((wh,item), 0))
+        safety_stock = float(params.get("safety_stock", 0))
+        lead_time = int(params.get("lead_time", 1))
+        MOQ = int(params.get("MOQ", 1))
+        pack_size = int(params.get("pack_size", 1))
+        description = params.get("description", "")
+        uom = params.get("uom", "")
 
-            safety_stock = params.get("safety_stock",0)
-            lead_time = int(params.get("lead_time",1))
-            MOQ = int(params.get("MOQ",1))
-            pack_size = int(params.get("pack_size",1))
-            uom = params.get("uom","")
-            description = params.get("description","")
+        # Demand logic (last 4 weeks average)
+        issued_list = issuance_grouped.get((wh, item), [])
+        avg_demand = np.mean(issued_list[-4:]) if len(issued_list) > 0 else 0
 
-            # Projected demand: average of last 4 weeks
-            last4 = issuance[(issuance["warehouse"]==wh) & (issuance["item_id"]==item)].sort_values("week_start").tail(4)
-            avg_demand = last4["issued_qty"].mean() if not last4.empty else 0
-            avg_demand = max(avg_demand,1)
+        if pd.isna(avg_demand) or avg_demand <= 0:
+            avg_demand = 1
 
-            for i, bucket in enumerate(time_buckets):
-                wkly_req = avg_demand
-                incoming = receipts[(receipts["warehouse"]==wh) & (receipts["item_id"]==item) & (receipts["week_start"]==bucket)]
-                incoming_qty = incoming["qty"].sum() if not incoming.empty else 0
+        avg_demand = float(avg_demand)
 
-                # Ensure previous_s and incoming_qty are numeric
-                previous_s = float(previous_s)
-                incoming_qty = float(incoming_qty)
-                safety_stock = float(safety_stock)
-                wkly_req = float(wkly_req)
+        for bucket in time_buckets:
 
-                end_s = previous_s - wkly_req + incoming_qty
-                shortage = max(safety_stock - end_s, 0)
-                planned_qty = 0
-                if shortage > 0:
-                    planned_qty = max(shortage, MOQ)
-                    planned_qty = int(np.ceil(planned_qty / pack_size) * pack_size)
-                    end_s += planned_qty
+            incoming_qty = float(receipts_grouped.get((wh,item,bucket), 0))
 
-                debug_rows.append({
-                    "warehouse": wh,
-                    "item": item,
-                    "description": description,
-                    "uom": uom,
-                    "week": bucket,
-                    "Beg_SOH": previous_s,
-                    "Wkly_Req": wkly_req,
-                    "Incoming": incoming_qty,
-                    "Shortage": shortage,
-                    "Planned_Order": planned_qty,
-                    "End_SOH": end_s,
-                    "Safety_Stock": safety_stock
-                })
+            wkly_req = avg_demand
+            end_s = previous_s - wkly_req + incoming_qty
+            shortage = max(safety_stock - end_s, 0)
 
-                previous_s = end_s
+            planned_qty = 0
+
+            if shortage > 0:
+                planned_qty = max(shortage, MOQ)
+                if pack_size > 0:
+                    planned_qty = np.ceil(planned_qty / pack_size) * pack_size
+                planned_qty = float(planned_qty)
+                end_s += planned_qty
+
+            debug_rows.append({
+                "warehouse": wh,
+                "item": item,
+                "description": description,
+                "uom": uom,
+                "week": bucket,
+                "Beg_SOH": previous_s,
+                "Wkly_Req": wkly_req,
+                "Incoming": incoming_qty,
+                "Planned_Order": planned_qty,
+                "End_SOH": end_s,
+            })
+
+            previous_s = end_s
 
     debug_df = pd.DataFrame(debug_rows)
 
     # -------------------------------
-    # 7️⃣ Create Parameter-vs-Week Table (with DTL)
+    # Parameter Table
     # -------------------------------
-    parameters = ["Beg_SOH","Wkly_Req","Incoming","Planned_Order","End_SOH","DTL"]
+    parameters = ["Beg_SOH","Wkly_Req","Incoming","Planned_Order","End_SOH"]
     long_rows = []
     week_labels = [w.strftime("%b %d, %Y") for w in time_buckets]
 
-    for wh in warehouses:
-        wh_debug = debug_df[debug_df["warehouse"]==wh]
-        wh_items = wh_debug["item"].unique()
-        for item in wh_items:
-            item_debug = wh_debug[wh_debug["item"]==item]
-            uom = items_dict.get((wh,item),{}).get("uom","")
-            description = items_dict.get((wh,item),{}).get("description","")
-            for param in parameters:
-                row = {"warehouse": wh, "item": item, "description": description, "uom": uom, "parameter": param}
-                for i, w in enumerate(time_buckets):
-                    val = item_debug[item_debug["week"]==w][param.replace("DTL","End_SOH" if param=="DTL" else param)].values
-                    if len(val) > 0:
-                        val_scalar = val[0]
-                        if param=="DTL":
-                            avg_req = item_debug["Wkly_Req"].mean()
-                            val_scalar = (val_scalar / avg_req * 7) if avg_req > 0 else 0
-                        row[week_labels[i]] = round(val_scalar,2)
-                    else:
-                        row[week_labels[i]] = 0
-                long_rows.append(row)
+    for (wh, item), _ in items_dict.items():
+        item_debug = debug_df[
+            (debug_df["warehouse"]==wh) &
+            (debug_df["item"]==item)
+        ]
+
+        for param in parameters:
+            row = {
+                "warehouse": wh,
+                "item": item,
+                "description": item_debug["description"].iloc[0],
+                "uom": item_debug["uom"].iloc[0],
+                "parameter": param
+            }
+
+            for i, w in enumerate(time_buckets):
+                val = item_debug[item_debug["week"]==w][param].values
+                row[week_labels[i]] = float(val[0]) if len(val)>0 else 0
+
+            long_rows.append(row)
 
     param_table = pd.DataFrame(long_rows)
 
-    # -------------------------------
-    # 8️⃣ Styling Table
-    # -------------------------------
-    def style_param_table_by_item(row):
-        styles = []
-        item_colors = {}
-        unique_items = param_table['item'].unique()
-        colors = ['#e8e8e8', '#f5f5f5']
-        for idx, itm in enumerate(unique_items):
-            item_colors[itm] = colors[idx % 2]
-        base_color = item_colors.get(row['item'], '#ffffff')
-        for col in row.index:
-            try:
-                val = float(row[col])
-            except:
-                val = 0
-            if row['parameter']=='DTL' and val<7:
-                styles.append('background-color: #f8d7da; color: black')
-            elif row['parameter']=='Planned_Order' and val>0:
-                styles.append('background-color: #d4edda; color: black')
-            else:
-                styles.append(f'background-color: {base_color}; color: black')
-        return styles
+    # Force 2 decimal places
+    numeric_cols = param_table.select_dtypes(include=["float","int"]).columns
+    param_table[numeric_cols] = param_table[numeric_cols].astype(float).round(2)
 
     st.subheader("MRP Logic Table and Planning Horizon")
-    st.dataframe(param_table.style.apply(style_param_table_by_item, axis=1))
+    st.dataframe(param_table.style.format("{:.2f}"))
 
     # -------------------------------
-    # 9️⃣ Planned Orders Table (Downloadable)
+    # Planned Orders Table
     # -------------------------------
-    planned_rows = []
-    for _, r in debug_df.iterrows():
-        if r["Planned_Order"] > 0:
-            params = items_dict.get((r["warehouse"],r["item"]),{})
-            lead_time = int(params.get("lead_time",1))
-            receipt_week = r["week"]
-            release_week = receipt_week - pd.Timedelta(weeks=lead_time)
-            planned_rows.append({
-                "warehouse": r["warehouse"],
-                "item": r["item"],
-                "description": params.get("description",""),
-                "uom": r["uom"],
-                "planned_qty": r["Planned_Order"],
-                "receipt_week": receipt_week.strftime("%b %d, %Y"),
-                "release_week": release_week.strftime("%b %d, %Y")
-            })
+    planned_df = debug_df[debug_df["Planned_Order"] > 0].copy()
 
-    planned_df = pd.DataFrame(planned_rows)
-    st.subheader("Upcoming Planned Orders")
     if planned_df.empty:
         st.warning("No upcoming planned orders.")
     else:
-        planned_df["release_week_dt"] = pd.to_datetime(planned_df["release_week"], format="%b %d, %Y")
-        planned_df.sort_values(["release_week_dt","warehouse","item"], inplace=True)
-        planned_df.drop(columns=["release_week_dt"], inplace=True)
-        st.dataframe(planned_df)
+        planned_df["receipt_week"] = planned_df["week"]
+        planned_df["release_week"] = planned_df["receipt_week"] - \
+            pd.to_timedelta(planned_df["warehouse"].map(
+                lambda x: items_dict[(x, planned_df.loc[planned_df["warehouse"]==x, "item"].iloc[0])]["lead_time"]
+            ), unit="W")
 
-        # Excel download
+        planned_df = planned_df[[
+            "warehouse","item","description","uom",
+            "Planned_Order","receipt_week"
+        ]]
+
+        planned_df.rename(columns={"Planned_Order":"planned_qty"}, inplace=True)
+
+        st.subheader("Upcoming Planned Orders")
+        st.dataframe(planned_df.style.format({"planned_qty":"{:.2f}"}))
+
+        # Excel Download
         output = io.BytesIO()
-        planned_df.to_excel(output, index=False, engine='openpyxl')
+        planned_df.to_excel(output, index=False, engine="openpyxl")
         output.seek(0)
+
         st.download_button(
-            label="📥 Download Planned Orders as Excel",
+            "📥 Download Planned Orders as Excel",
             data=output,
             file_name="planned_orders.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
