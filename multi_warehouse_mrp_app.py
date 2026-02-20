@@ -28,78 +28,71 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
     # ROBUST FILE LOADER (Cloud Safe)
     # -------------------------------
     def load_file(f):
-        if f.name.lower().endswith(".xlsx"):
-            return pd.read_excel(f)
-        elif f.name.lower().endswith(".csv"):
-            try:
-                return pd.read_csv(f, encoding="utf-8")
-            except UnicodeDecodeError:
+        try:
+            if f.name.lower().endswith(".xlsx"):
+                return pd.read_excel(f)
+            elif f.name.lower().endswith(".csv"):
+                f.seek(0)
                 try:
-                    return pd.read_csv(f, encoding="utf-8-sig")
+                    return pd.read_csv(f, encoding="utf-8")
                 except UnicodeDecodeError:
+                    f.seek(0)
                     try:
+                        return pd.read_csv(f, encoding="utf-8-sig")
+                    except UnicodeDecodeError:
+                        f.seek(0)
                         return pd.read_csv(f, encoding="latin1")
-                    except Exception:
-                        st.error(f"Unable to read CSV file: {f.name}")
-                        st.stop()
-        else:
-            st.error(f"Unsupported file type: {f.name}")
+            else:
+                st.error(f"Unsupported file type: {f.name}")
+                st.stop()
+        except Exception as e:
+            st.error(f"Error reading file {f.name}: {e}")
             st.stop()
 
+    # Load all files
     inventory = load_file(inventory_file)
     issuance = load_file(issuance_file)
     receipts = load_file(receipts_file)
     items = load_file(item_master_file)
 
-    # Ensure numeric columns are numeric
-    for col in ["on_hand_qty"]:
-        if col in inventory.columns:
-            inventory[col] = pd.to_numeric(inventory[col], errors="coerce").fillna(0)
-    for col in ["issued_qty"]:
-        if col in issuance.columns:
-            issuance[col] = pd.to_numeric(issuance[col], errors="coerce").fillna(0)
-    for col in ["qty"]:
-        if col in receipts.columns:
-            receipts[col] = pd.to_numeric(receipts[col], errors="coerce").fillna(0)
-    for col in ["safety_stock","lead_time","MOQ","pack_size"]:
-        if col in items.columns:
-            items[col] = pd.to_numeric(items[col], errors="coerce").fillna(0)
-
     # Ensure UOM is string
     for df in [inventory, issuance, receipts, items]:
         if "uom" in df.columns:
             df["uom"] = df["uom"].astype(str)
+        else:
+            st.error(f"Column 'uom' missing in {df}")
+            st.stop()
 
     st.success("Files loaded successfully!")
 
     # -------------------------------
-    # 2️⃣ UOM Consistency Check (Table)
+    # 2️⃣ UOM Consistency Check (Flag Only)
     # -------------------------------
-    uom_mismatch_rows = []
-
+    uom_issues = []
     for item in items["item_id"].unique():
         uoms = {}
-        if "uom" in items.columns:
-            uoms["Item Master"] = set([str(x).lower() for x in items.loc[items["item_id"]==item, "uom"].unique()])
-        if "uom" in inventory.columns:
-            uoms["Inventory"] = set([str(x).lower() for x in inventory.loc[inventory["item_id"]==item, "uom"].unique()])
-        if "uom" in issuance.columns:
-            uoms["Issuance"] = set([str(x).lower() for x in issuance.loc[issuance["item_id"]==item, "uom"].unique()])
-        if "uom" in receipts.columns:
-            uoms["Receipts"] = set([str(x).lower() for x in receipts.loc[receipts["item_id"]==item, "uom"].unique()])
+        uoms["Item Master"] = items.loc[items["item_id"] == item, "uom"].iloc[0].upper()
+        wh_uoms = inventory[inventory["item_id"]==item].groupby("warehouse")["uom"].unique()
+        for wh, vals in wh_uoms.items():
+            uoms[f"Inventory {wh}"] = [v.upper() for v in vals]
+        iss_uoms = issuance[issuance["item_id"]==item]["uom"].unique()
+        uoms["Issuance"] = [v.upper() for v in iss_uoms]
+        rec_uoms = receipts[receipts["item_id"]==item]["uom"].unique()
+        uoms["Receipts"] = [v.upper() for v in rec_uoms]
 
-        all_uoms = set()
-        for u in uoms.values():
-            all_uoms.update(u)
-        if len(all_uoms) > 1:
-            row = {"Item": item}
-            for src,u in uoms.items():
-                row[src] = ", ".join(u)
-            uom_mismatch_rows.append(row)
+        # Flatten all UOMs
+        flat = set()
+        for v in uoms.values():
+            if isinstance(v, list):
+                flat.update(v)
+            else:
+                flat.add(v)
+        if len(flat) > 1:
+            uom_issues.append({"item_id": item, **uoms})
 
-    if uom_mismatch_rows:
-        st.subheader("⚠ UOM Mismatches Detected")
-        st.dataframe(pd.DataFrame(uom_mismatch_rows))
+    if uom_issues:
+        st.warning("⚠ UOM mismatches detected (case-insensitive comparison):")
+        st.dataframe(pd.DataFrame(uom_issues))
 
     # Convert date columns
     issuance["week_start"] = pd.to_datetime(issuance["week_start"])
@@ -189,7 +182,7 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
     debug_df = pd.DataFrame(debug_rows)
 
     # -------------------------------
-    # 6️⃣ Create Parameter-vs-Week Table (with DTL)
+    # 6️⃣ Parameter-vs-Week Table
     # -------------------------------
     parameters = ["Beg_SOH","Wkly_Req","Incoming","Planned_Order","End_SOH","DTL"]
     long_rows = []
@@ -246,7 +239,7 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
     st.dataframe(param_table.style.apply(style_param_table_by_item, axis=1))
 
     # -------------------------------
-    # 8️⃣ Planned Orders Table (Downloadable)
+    # 8️⃣ Planned Orders Table
     # -------------------------------
     planned_rows = []
     for _, r in debug_df.iterrows():
