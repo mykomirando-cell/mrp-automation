@@ -32,75 +32,85 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
             if f.name.lower().endswith(".xlsx"):
                 return pd.read_excel(f)
             elif f.name.lower().endswith(".csv"):
-                f.seek(0)
                 try:
                     return pd.read_csv(f, encoding="utf-8")
                 except UnicodeDecodeError:
-                    f.seek(0)
                     try:
                         return pd.read_csv(f, encoding="utf-8-sig")
                     except UnicodeDecodeError:
-                        f.seek(0)
                         return pd.read_csv(f, encoding="latin1")
             else:
                 st.error(f"Unsupported file type: {f.name}")
                 st.stop()
         except Exception as e:
-            st.error(f"Error reading file {f.name}: {e}")
+            st.error(f"Error loading {f.name}: {e}")
             st.stop()
 
-    # Load all files
     inventory = load_file(inventory_file)
     issuance = load_file(issuance_file)
     receipts = load_file(receipts_file)
     items = load_file(item_master_file)
 
+    # -------------------------------
+    # 1️⃣b: Ensure numeric columns
+    # -------------------------------
+    numeric_cols_inventory = ["on_hand_qty"]
+    for col in numeric_cols_inventory:
+        if col in inventory.columns:
+            inventory[col] = pd.to_numeric(inventory[col], errors='coerce').fillna(0)
+
+    numeric_cols_items = ["safety_stock","lead_time","MOQ","pack_size"]
+    for col in numeric_cols_items:
+        if col in items.columns:
+            items[col] = pd.to_numeric(items[col], errors='coerce').fillna(0)
+
+    for col in ["issued_qty"]:
+        if col in issuance.columns:
+            issuance[col] = pd.to_numeric(issuance[col], errors='coerce').fillna(0)
+
+    for col in ["qty"]:
+        if col in receipts.columns:
+            receipts[col] = pd.to_numeric(receipts[col], errors='coerce').fillna(0)
+
     # Ensure UOM is string
     for df in [inventory, issuance, receipts, items]:
         if "uom" in df.columns:
             df["uom"] = df["uom"].astype(str)
-        else:
-            st.error(f"Column 'uom' missing in {df}")
-            st.stop()
 
     st.success("Files loaded successfully!")
 
     # -------------------------------
-    # 2️⃣ UOM Consistency Check (Flag Only)
+    # 2️⃣ UOM Consistency Check (case-insensitive)
     # -------------------------------
-    uom_issues = []
+    uom_mismatches = []
     for item in items["item_id"].unique():
         uoms = {}
-        uoms["Item Master"] = items.loc[items["item_id"] == item, "uom"].iloc[0].upper()
-        wh_uoms = inventory[inventory["item_id"]==item].groupby("warehouse")["uom"].unique()
-        for wh, vals in wh_uoms.items():
-            uoms[f"Inventory {wh}"] = [v.upper() for v in vals]
-        iss_uoms = issuance[issuance["item_id"]==item]["uom"].unique()
-        uoms["Issuance"] = [v.upper() for v in iss_uoms]
-        rec_uoms = receipts[receipts["item_id"]==item]["uom"].unique()
-        uoms["Receipts"] = [v.upper() for v in rec_uoms]
+        uoms["item_master"] = items.loc[items["item_id"]==item, "uom"].iloc[0].upper()
+        if item in inventory["item_id"].values:
+            uoms["inventory"] = inventory.loc[inventory["item_id"]==item, "uom"].unique()[0].upper()
+        if item in issuance["item_id"].values:
+            uoms["issuance"] = issuance.loc[issuance["item_id"]==item, "uom"].unique()[0].upper()
+        if item in receipts["item_id"].values:
+            uoms["receipts"] = receipts.loc[receipts["item_id"]==item, "uom"].unique()[0].upper()
+        if len(set(uoms.values())) > 1:
+            uom_mismatches.append({"item_id": item, **uoms})
 
-        # Flatten all UOMs
-        flat = set()
-        for v in uoms.values():
-            if isinstance(v, list):
-                flat.update(v)
-            else:
-                flat.add(v)
-        if len(flat) > 1:
-            uom_issues.append({"item_id": item, **uoms})
+    if uom_mismatches:
+        st.warning("⚠ UOM mismatches detected (case-insensitive). Review below:")
+        st.dataframe(pd.DataFrame(uom_mismatches))
 
-    if uom_issues:
-        st.warning("⚠ UOM mismatches detected (case-insensitive comparison):")
-        st.dataframe(pd.DataFrame(uom_issues))
+    # -------------------------------
+    # 3️⃣ Convert date columns
+    # -------------------------------
+    if "week_start" in issuance.columns:
+        issuance["week_start"] = pd.to_datetime(issuance["week_start"], errors='coerce')
+    if "week_start" in receipts.columns:
+        receipts["week_start"] = pd.to_datetime(receipts["week_start"], errors='coerce')
 
-    # Convert date columns
-    issuance["week_start"] = pd.to_datetime(issuance["week_start"])
-    receipts["week_start"] = pd.to_datetime(receipts["week_start"])
     warehouses = inventory["warehouse"].unique()
 
     # -------------------------------
-    # 3️⃣ Warehouse-Specific Item Master
+    # 4️⃣ Warehouse-Specific Item Master
     # -------------------------------
     required_cols = ["warehouse","item_id","description","safety_stock","lead_time","MOQ","pack_size","uom"]
     missing = [c for c in required_cols if c not in items.columns]
@@ -117,7 +127,7 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
     items_dict = items.set_index(["warehouse","item_id"]).to_dict("index")
 
     # -------------------------------
-    # 4️⃣ Future Planning Weeks (Monday Start)
+    # 5️⃣ Future Planning Weeks (Monday Start)
     # -------------------------------
     today = pd.to_datetime(date.today())
     today_monday = today - pd.Timedelta(days=today.weekday())
@@ -125,7 +135,7 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
     time_buckets = [today_monday + timedelta(weeks=w) for w in range(num_weeks)]
 
     # -------------------------------
-    # 5️⃣ Initialize MRP Structures
+    # 6️⃣ Initialize MRP Structures
     # -------------------------------
     debug_rows = []
 
@@ -154,12 +164,18 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
                 incoming = receipts[(receipts["warehouse"]==wh) & (receipts["item_id"]==item) & (receipts["week_start"]==bucket)]
                 incoming_qty = incoming["qty"].sum() if not incoming.empty else 0
 
+                # Ensure previous_s and incoming_qty are numeric
+                previous_s = float(previous_s)
+                incoming_qty = float(incoming_qty)
+                safety_stock = float(safety_stock)
+                wkly_req = float(wkly_req)
+
                 end_s = previous_s - wkly_req + incoming_qty
-                shortage = max(safety_stock - end_s,0)
+                shortage = max(safety_stock - end_s, 0)
                 planned_qty = 0
                 if shortage > 0:
-                    planned_qty = max(shortage,MOQ)
-                    planned_qty = int(np.ceil(planned_qty/pack_size)*pack_size)
+                    planned_qty = max(shortage, MOQ)
+                    planned_qty = int(np.ceil(planned_qty / pack_size) * pack_size)
                     end_s += planned_qty
 
                 debug_rows.append({
@@ -182,7 +198,7 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
     debug_df = pd.DataFrame(debug_rows)
 
     # -------------------------------
-    # 6️⃣ Parameter-vs-Week Table
+    # 7️⃣ Create Parameter-vs-Week Table (with DTL)
     # -------------------------------
     parameters = ["Beg_SOH","Wkly_Req","Incoming","Planned_Order","End_SOH","DTL"]
     long_rows = []
@@ -212,7 +228,7 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
     param_table = pd.DataFrame(long_rows)
 
     # -------------------------------
-    # 7️⃣ Styling Table
+    # 8️⃣ Styling Table
     # -------------------------------
     def style_param_table_by_item(row):
         styles = []
@@ -239,7 +255,7 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
     st.dataframe(param_table.style.apply(style_param_table_by_item, axis=1))
 
     # -------------------------------
-    # 8️⃣ Planned Orders Table
+    # 9️⃣ Planned Orders Table (Downloadable)
     # -------------------------------
     planned_rows = []
     for _, r in debug_df.iterrows():
