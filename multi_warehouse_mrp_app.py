@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 from datetime import timedelta, date
 import io
-from pandas.errors import EmptyDataError
 
 st.set_page_config(layout="wide")
 st.title("Material Requirement Planning Automation")
@@ -12,6 +11,7 @@ st.title("Material Requirement Planning Automation")
 # 1️⃣ Upload Input Files
 # -------------------------------
 st.header("Upload Input Files")
+
 col1, col2, col3, col4 = st.columns(4)
 with col1:
     inventory_file = st.file_uploader("Inventory On Hand", type=["csv", "xlsx"])
@@ -22,82 +22,105 @@ with col3:
 with col4:
     item_master_file = st.file_uploader("Item Master", type=["csv", "xlsx"])
 
-# -------------------------------
-# ROBUST FILE LOADER
-# -------------------------------
-def load_file(f):
-    if not f:
-        st.error("No file provided.")
-        st.stop()
-
-    if f.name.lower().endswith(".xlsx"):
-        try:
-            return pd.read_excel(f)
-        except Exception as e:
-            st.error(f"Unable to read Excel file {f.name}: {e}")
-            st.stop()
-
-    elif f.name.lower().endswith(".csv"):
-        for enc in ["utf-8", "utf-8-sig", "latin1"]:
-            try:
-                return pd.read_csv(f, encoding=enc)
-            except UnicodeDecodeError:
-                continue
-            except EmptyDataError:
-                st.error(f"The CSV file {f.name} is empty or malformed.")
-                st.stop()
-            except Exception as e:
-                st.error(f"Error reading CSV file {f.name} with encoding {enc}: {e}")
-                st.stop()
-        st.error(f"Unable to read CSV file {f.name} with utf-8/utf-8-sig/latin1 encodings.")
-        st.stop()
-
-    else:
-        st.error(f"Unsupported file type: {f.name}")
-        st.stop()
 
 if inventory_file and issuance_file and receipts_file and item_master_file:
-    # Load files
+
+    # -------------------------------
+    # ROBUST FILE LOADER (Cloud Safe)
+    # -------------------------------
+    def load_file(f):
+        if not f:
+            st.error("No file provided.")
+            st.stop()
+
+        f.seek(0)  # reset pointer
+
+        if f.name.lower().endswith(".xlsx"):
+            try:
+                df = pd.read_excel(f)
+                if df.empty:
+                    st.warning(f"Excel file {f.name} appears empty.")
+                return df
+            except Exception as e:
+                st.error(f"Unable to read Excel file {f.name}: {e}")
+                st.stop()
+
+        elif f.name.lower().endswith(".csv"):
+            for enc in ["utf-8", "utf-8-sig", "latin1"]:
+                try:
+                    f.seek(0)
+                    df = pd.read_csv(f, encoding=enc)
+                    if df.empty:
+                        st.warning(f"The CSV file {f.name} is empty using encoding {enc}.")
+                    return df
+                except pd.errors.EmptyDataError:
+                    st.warning(f"The CSV file {f.name} is empty with encoding {enc}.")
+                    continue
+                except UnicodeDecodeError:
+                    continue
+                except Exception as e:
+                    st.warning(f"Error reading CSV file {f.name} with encoding {enc}: {e}")
+                    continue
+            st.error(f"Unable to read CSV file {f.name} with utf-8/utf-8-sig/latin1 encodings.")
+            st.stop()
+        else:
+            st.error(f"Unsupported file type: {f.name}")
+            st.stop()
+
+
+    # -------------------------------
+    # LOAD FILES
+    # -------------------------------
     inventory = load_file(inventory_file)
     issuance = load_file(issuance_file)
     receipts = load_file(receipts_file)
     items = load_file(item_master_file)
 
-    # Ensure UOM is string and lowercase (for case-insensitive comparison)
+    # Ensure UOM is string
     for df in [inventory, issuance, receipts, items]:
         if "uom" in df.columns:
-            df["uom"] = df["uom"].astype(str).str.lower()
+            df["uom"] = df["uom"].astype(str)
+        else:
+            st.warning(f"{f.name} does not have 'uom' column.")
+
 
     st.success("Files loaded successfully!")
 
-    # -------------------------------
-    # 2️⃣ UOM Consistency Check (non-blocking)
-    # -------------------------------
-    uom_warnings = []
-    for item in items["item_id"].unique():
-        uoms = {}
-        uoms["item_master"] = set(items.loc[items["item_id"]==item, "uom"].str.lower())
-        uoms["inventory"] = set(inventory.loc[inventory["item_id"]==item, "uom"].str.lower())
-        uoms["issuance"] = set(issuance.loc[issuance["item_id"]==item, "uom"].str.lower())
-        uoms["receipts"] = set(receipts.loc[receipts["item_id"]==item, "uom"].str.lower())
-        all_uoms = set.union(*uoms.values())
-        if len(all_uoms) > 1:
-            uom_warnings.append({"item_id": item, "uoms": uoms})
-    if uom_warnings:
-        st.warning("⚠ UOM mismatches detected (case-insensitive comparison):")
-        st.json(uom_warnings)
 
     # -------------------------------
-    # 3️⃣ Convert date columns
+    # 2️⃣ UOM Consistency Check (Case-Insensitive)
     # -------------------------------
+    for item in items["item_id"].unique():
+        uoms = {}
+        # Gather all UOMs across files
+        if "uom" in items.columns:
+            uoms["Item Master"] = set([str(x).lower() for x in items.loc[items["item_id"]==item, "uom"].unique()])
+        if "uom" in inventory.columns:
+            uoms["Inventory"] = set([str(x).lower() for x in inventory.loc[inventory["item_id"]==item, "uom"].unique()])
+        if "uom" in issuance.columns:
+            uoms["Issuance"] = set([str(x).lower() for x in issuance.loc[issuance["item_id"]==item, "uom"].unique()])
+        if "uom" in receipts.columns:
+            uoms["Receipts"] = set([str(x).lower() for x in receipts.loc[receipts["item_id"]==item, "uom"].unique()])
+
+        all_uoms = set()
+        for source, u in uoms.items():
+            all_uoms.update(u)
+        if len(all_uoms) > 1:
+            # Show exactly which file has which UOM
+            mismatch_details = ", ".join([f"{src}: {list(u)}" for src,u in uoms.items() if u])
+            st.warning(f"⚠ UOM mismatch for item {item}: {mismatch_details}")
+
+
+    # Convert date columns
     if "week_start" in issuance.columns:
         issuance["week_start"] = pd.to_datetime(issuance["week_start"])
     if "week_start" in receipts.columns:
         receipts["week_start"] = pd.to_datetime(receipts["week_start"])
     warehouses = inventory["warehouse"].unique()
 
+
     # -------------------------------
-    # 4️⃣ Warehouse-Specific Item Master Checks
+    # 3️⃣ Warehouse-Specific Item Master
     # -------------------------------
     required_cols = ["warehouse","item_id","description","safety_stock","lead_time","MOQ","pack_size","uom"]
     missing = [c for c in required_cols if c not in items.columns]
@@ -113,18 +136,21 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
 
     items_dict = items.set_index(["warehouse","item_id"]).to_dict("index")
 
+
     # -------------------------------
-    # 5️⃣ Future Planning Weeks (Monday Start)
+    # 4️⃣ Future Planning Weeks (Monday Start)
     # -------------------------------
     today = pd.to_datetime(date.today())
     today_monday = today - pd.Timedelta(days=today.weekday())
     num_weeks = 12
     time_buckets = [today_monday + timedelta(weeks=w) for w in range(num_weeks)]
 
+
     # -------------------------------
-    # 6️⃣ Initialize MRP Structures
+    # 5️⃣ Initialize MRP Structures
     # -------------------------------
     debug_rows = []
+
     for wh in warehouses:
         wh_inventory = inventory[inventory["warehouse"]==wh].set_index("item_id")["on_hand_qty"].to_dict()
         wh_items = [item for (w,item) in items_dict.keys() if w==wh]
@@ -172,12 +198,73 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
                     "End_SOH": end_s,
                     "Safety_Stock": safety_stock
                 })
+
                 previous_s = end_s
 
     debug_df = pd.DataFrame(debug_rows)
 
+
     # -------------------------------
-    # 7️⃣ Planned Orders Table
+    # 6️⃣ Create Parameter-vs-Week Table (with DTL)
+    # -------------------------------
+    parameters = ["Beg_SOH","Wkly_Req","Incoming","Planned_Order","End_SOH","DTL"]
+    long_rows = []
+    week_labels = [w.strftime("%b %d, %Y") for w in time_buckets]
+
+    for wh in warehouses:
+        wh_debug = debug_df[debug_df["warehouse"]==wh]
+        wh_items = wh_debug["item"].unique()
+        for item in wh_items:
+            item_debug = wh_debug[wh_debug["item"]==item]
+            uom = items_dict.get((wh,item),{}).get("uom","")
+            description = items_dict.get((wh,item),{}).get("description","")
+            for param in parameters:
+                row = {"warehouse": wh, "item": item, "description": description, "uom": uom, "parameter": param}
+                for i, w in enumerate(time_buckets):
+                    val = item_debug[item_debug["week"]==w][param.replace("DTL","End_SOH" if param=="DTL" else param)].values
+                    if len(val) > 0:
+                        val_scalar = val[0]
+                        if param=="DTL":
+                            avg_req = item_debug["Wkly_Req"].mean()
+                            val_scalar = (val_scalar / avg_req * 7) if avg_req > 0 else 0
+                        row[week_labels[i]] = round(val_scalar,2)
+                    else:
+                        row[week_labels[i]] = 0
+                long_rows.append(row)
+
+    param_table = pd.DataFrame(long_rows)
+
+
+    # -------------------------------
+    # 7️⃣ Styling Table
+    # -------------------------------
+    def style_param_table_by_item(row):
+        styles = []
+        item_colors = {}
+        unique_items = param_table['item'].unique()
+        colors = ['#e8e8e8', '#f5f5f5']
+        for idx, itm in enumerate(unique_items):
+            item_colors[itm] = colors[idx % 2]
+        base_color = item_colors.get(row['item'], '#ffffff')
+        for col in row.index:
+            try:
+                val = float(row[col])
+            except:
+                val = 0
+            if row['parameter']=='DTL' and val<7:
+                styles.append('background-color: #f8d7da; color: black')
+            elif row['parameter']=='Planned_Order' and val>0:
+                styles.append('background-color: #d4edda; color: black')
+            else:
+                styles.append(f'background-color: {base_color}; color: black')
+        return styles
+
+    st.subheader("MRP Logic Table and Planning Horizon")
+    st.dataframe(param_table.style.apply(style_param_table_by_item, axis=1))
+
+
+    # -------------------------------
+    # 8️⃣ Planned Orders Table (Downloadable)
     # -------------------------------
     planned_rows = []
     for _, r in debug_df.iterrows():
