@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import timedelta, date
+import io
 
 st.set_page_config(layout="wide")
 st.title("Material Requirement Planning Automation")
@@ -34,8 +35,7 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
 
     # Ensure UOM is string
     for df in [inventory, issuance, receipts, items]:
-        if 'uom' in df.columns:
-            df["uom"] = df["uom"].astype(str)
+        df["uom"] = df["uom"].astype(str)
 
     st.success("Files loaded successfully!")
 
@@ -55,14 +55,12 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
     # Convert date columns
     issuance["week_start"] = pd.to_datetime(issuance["week_start"])
     receipts["week_start"] = pd.to_datetime(receipts["week_start"])
-
     warehouses = inventory["warehouse"].unique()
 
     # -------------------------------
     # 3️⃣ Warehouse-Specific Item Master
     # -------------------------------
-    required_cols = ["warehouse","item_id","safety_stock","lead_time","MOQ","pack_size","uom","description"]
-
+    required_cols = ["warehouse","item_id","description","safety_stock","lead_time","MOQ","pack_size","uom"]
     missing = [c for c in required_cols if c not in items.columns]
     if missing:
         st.error(f"Missing required columns in Item Master: {missing}")
@@ -85,7 +83,7 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
     time_buckets = [today_monday + timedelta(weeks=w) for w in range(num_weeks)]
 
     # -------------------------------
-    # 5️⃣ Initialize MRP Structures (with DTL using latest 4-week historical demand)
+    # 5️⃣ Initialize MRP Structures
     # -------------------------------
     debug_rows = []
 
@@ -104,15 +102,13 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
             uom = params.get("uom","")
             description = params.get("description","")
 
-            # Latest 4-week historical demand (fixed for all weeks)
-            item_hist = issuance[(issuance["warehouse"]==wh) & (issuance["item_id"]==item)].sort_values("week_start")
-            last4 = item_hist.tail(4)
-            avg_4wk_demand = last4["issued_qty"].mean() if not last4.empty else 1
-            avg_4wk_demand = max(avg_4wk_demand,1)
+            # Projected demand: average of last 4 weeks
+            last4 = issuance[(issuance["warehouse"]==wh) & (issuance["item_id"]==item)].sort_values("week_start").tail(4)
+            avg_demand = last4["issued_qty"].mean() if not last4.empty else 0
+            avg_demand = max(avg_demand,1)
 
-            for bucket in time_buckets:
-                wkly_req = avg_4wk_demand  # same projected demand for all weeks
-
+            for i, bucket in enumerate(time_buckets):
+                wkly_req = avg_demand
                 incoming = receipts[(receipts["warehouse"]==wh) & (receipts["item_id"]==item) & (receipts["week_start"]==bucket)]
                 incoming_qty = incoming["qty"].sum() if not incoming.empty else 0
 
@@ -123,8 +119,6 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
                     planned_qty = max(shortage,MOQ)
                     planned_qty = int(np.ceil(planned_qty/pack_size)*pack_size)
                     end_s += planned_qty
-
-                dtl_days = (end_s / avg_4wk_demand) * 7
 
                 debug_rows.append({
                     "warehouse": wh,
@@ -138,8 +132,7 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
                     "Shortage": shortage,
                     "Planned_Order": planned_qty,
                     "End_SOH": end_s,
-                    "Safety_Stock": safety_stock,
-                    "DTL": dtl_days
+                    "Safety_Stock": safety_stock
                 })
 
                 previous_s = end_s
@@ -147,9 +140,9 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
     debug_df = pd.DataFrame(debug_rows)
 
     # -------------------------------
-    # 6️⃣ Create Parameter-vs-Week Table
+    # 6️⃣ Create Parameter-vs-Week Table (with DTL)
     # -------------------------------
-    parameters = ["Beg_SOH","Wkly_Req","Incoming","Planned_Order","End_SOH","DTL"]  # Shortage hidden
+    parameters = ["Beg_SOH","Wkly_Req","Incoming","Planned_Order","End_SOH","DTL"]
     long_rows = []
     week_labels = [w.strftime("%b %d, %Y") for w in time_buckets]
 
@@ -163,8 +156,15 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
             for param in parameters:
                 row = {"warehouse": wh, "item": item, "description": description, "uom": uom, "parameter": param}
                 for i, w in enumerate(time_buckets):
-                    val = item_debug[item_debug["week"]==w][param].values
-                    row[week_labels[i]] = "{:.2f}".format(val[0]) if len(val)>0 else "0.00"
+                    val = item_debug[item_debug["week"]==w][param.replace("DTL","End_SOH" if param=="DTL" else param)].values
+                    if len(val) > 0:
+                        val_scalar = val[0]
+                        if param=="DTL":
+                            avg_req = item_debug["Wkly_Req"].mean()
+                            val_scalar = (val_scalar / avg_req * 7) if avg_req > 0 else 0
+                        row[week_labels[i]] = round(val_scalar,2)
+                    else:
+                        row[week_labels[i]] = 0
                 long_rows.append(row)
 
     param_table = pd.DataFrame(long_rows)
@@ -180,29 +180,24 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
         for idx, itm in enumerate(unique_items):
             item_colors[itm] = colors[idx % 2]
         base_color = item_colors.get(row['item'], '#ffffff')
-
         for col in row.index:
-            if col in ["warehouse","item","description","uom","parameter"]:
-                styles.append(f'background-color: {base_color}; color: black')
-            else:
+            try:
+                val = float(row[col])
+            except:
                 val = 0
-                try:
-                    val = float(row[col])
-                except:
-                    pass
-                if row['parameter']=="Planned_Order" and val>0:
-                    styles.append('background-color: #d4edda; color: black')
-                elif row['parameter']=="DTL" and val<7:
-                    styles.append('background-color: #f5c6cb; color: black')  # red if DTL <7
-                else:
-                    styles.append(f'background-color: {base_color}; color: black')
+            if row['parameter']=='DTL' and val<7:
+                styles.append('background-color: #f8d7da; color: black')
+            elif row['parameter']=='Planned_Order' and val>0:
+                styles.append('background-color: #d4edda; color: black')
+            else:
+                styles.append(f'background-color: {base_color}; color: black')
         return styles
 
     st.subheader("MRP Logic Table and Planning Horizon")
     st.dataframe(param_table.style.apply(style_param_table_by_item, axis=1))
 
     # -------------------------------
-    # 8️⃣ Planned Orders Table
+    # 8️⃣ Planned Orders Table (Downloadable)
     # -------------------------------
     planned_rows = []
     for _, r in debug_df.iterrows():
@@ -230,5 +225,15 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
         planned_df.sort_values(["release_week_dt","warehouse","item"], inplace=True)
         planned_df.drop(columns=["release_week_dt"], inplace=True)
         st.dataframe(planned_df)
-        planned_df.to_excel("planned_orders.xlsx", index=False)
-        st.success("✅ Planned Orders exported to Excel")
+
+        # Excel download
+        output = io.BytesIO()
+        planned_df.to_excel(output, index=False, engine='openpyxl')
+        output.seek(0)
+        st.download_button(
+            label="📥 Download Planned Orders as Excel",
+            data=output,
+            file_name="planned_orders.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
