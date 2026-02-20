@@ -24,9 +24,36 @@ with col4:
 
 if inventory_file and issuance_file and receipts_file and item_master_file:
 
-    # Load files
-    def load_file(f):
-        return pd.read_excel(f) if f.name.endswith("xlsx") else pd.read_csv(f)
+    # -------------------------------
+# ROBUST FILE LOADER (Cloud Safe)
+# -------------------------------
+def load_file(f):
+
+    # Excel Files
+    if f.name.lower().endswith(".xlsx"):
+        return pd.read_excel(f)
+
+    # CSV Files (handles UTF-8 / ANSI / ERP exports)
+    elif f.name.lower().endswith(".csv"):
+
+        try:
+            return pd.read_csv(f, encoding="utf-8")
+
+        except UnicodeDecodeError:
+            try:
+                return pd.read_csv(f, encoding="utf-8-sig")
+
+            except UnicodeDecodeError:
+                try:
+                    return pd.read_csv(f, encoding="latin1")
+
+                except Exception:
+                    st.error(f"Unable to read CSV file: {f.name}")
+                    st.stop()
+
+    else:
+        st.error(f"Unsupported file type: {f.name}")
+        st.stop()
 
     inventory = load_file(inventory_file)
     issuance = load_file(issuance_file)
@@ -236,4 +263,3 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
             file_name="planned_orders.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-
