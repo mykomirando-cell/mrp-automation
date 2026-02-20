@@ -8,6 +8,18 @@ st.set_page_config(layout="wide")
 st.title("Material Requirement Planning Automation")
 
 # -------------------------------
+# Helper: Clean Columns
+# -------------------------------
+def clean_columns(df):
+    df.columns = (
+        df.columns
+        .str.strip()
+        .str.lower()
+        .str.replace(" ", "_")
+    )
+    return df
+
+# -------------------------------
 # 1️⃣ Upload Input Files
 # -------------------------------
 st.header("Upload Input Files")
@@ -24,25 +36,19 @@ with col4:
 
 if inventory_file and issuance_file and receipts_file and item_master_file:
 
-    # -------------------------------
-    # Robust File Loader
-    # -------------------------------
     def load_file(f):
         if f.name.lower().endswith(".xlsx"):
             return pd.read_excel(f)
-        elif f.name.lower().endswith(".csv"):
+        else:
             try:
                 return pd.read_csv(f, encoding="utf-8")
             except:
                 return pd.read_csv(f, encoding="latin1")
-        else:
-            st.error(f"Unsupported file type: {f.name}")
-            st.stop()
 
-    inventory = load_file(inventory_file)
-    issuance = load_file(issuance_file)
-    receipts = load_file(receipts_file)
-    items = load_file(item_master_file)
+    inventory = clean_columns(load_file(inventory_file))
+    issuance = clean_columns(load_file(issuance_file))
+    receipts = clean_columns(load_file(receipts_file))
+    items = clean_columns(load_file(item_master_file))
 
     # -------------------------------
     # Numeric Cleanup
@@ -51,7 +57,7 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
         if col in inventory.columns:
             inventory[col] = pd.to_numeric(inventory[col], errors="coerce").fillna(0)
 
-    for col in ["safety_stock", "lead_time", "MOQ", "pack_size"]:
+    for col in ["safety_stock", "lead_time", "moq", "pack_size"]:
         if col in items.columns:
             items[col] = pd.to_numeric(items[col], errors="coerce").fillna(0)
 
@@ -70,18 +76,12 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
     st.success("Files loaded successfully!")
 
     # -------------------------------
-    # Date Conversion
+    # Validate Item Master Columns
     # -------------------------------
-    if "week_start" in issuance.columns:
-        issuance["week_start"] = pd.to_datetime(issuance["week_start"])
-    if "week_start" in receipts.columns:
-        receipts["week_start"] = pd.to_datetime(receipts["week_start"])
-
-    # -------------------------------
-    # Item Master Validation
-    # -------------------------------
-    required_cols = ["warehouse","item_id","description",
-                     "safety_stock","lead_time","MOQ","pack_size","uom"]
+    required_cols = [
+        "warehouse","item_id","description",
+        "safety_stock","lead_time","moq","pack_size","uom"
+    ]
 
     missing = [c for c in required_cols if c not in items.columns]
     if missing:
@@ -95,6 +95,14 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
         st.stop()
 
     items_dict = items.set_index(["warehouse","item_id"]).to_dict("index")
+
+    # -------------------------------
+    # Date Conversion
+    # -------------------------------
+    if "week_start" in issuance.columns:
+        issuance["week_start"] = pd.to_datetime(issuance["week_start"])
+    if "week_start" in receipts.columns:
+        receipts["week_start"] = pd.to_datetime(receipts["week_start"])
 
     # -------------------------------
     # Planning Horizon
@@ -140,12 +148,11 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
         previous_s = float(inventory_grouped.get((wh,item), 0))
         safety_stock = float(params.get("safety_stock", 0))
         lead_time = int(params.get("lead_time", 1))
-        MOQ = int(params.get("MOQ", 1))
+        moq = int(params.get("moq", 1))
         pack_size = int(params.get("pack_size", 1))
         description = params.get("description", "")
         uom = params.get("uom", "")
 
-        # Demand logic (last 4 weeks average)
         issued_list = issuance_grouped.get((wh, item), [])
         avg_demand = np.mean(issued_list[-4:]) if len(issued_list) > 0 else 0
 
@@ -165,7 +172,7 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
             planned_qty = 0
 
             if shortage > 0:
-                planned_qty = max(shortage, MOQ)
+                planned_qty = max(shortage, moq)
                 if pack_size > 0:
                     planned_qty = np.ceil(planned_qty / pack_size) * pack_size
                 planned_qty = float(planned_qty)
@@ -218,7 +225,6 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
 
     param_table = pd.DataFrame(long_rows)
 
-    # Force 2 decimal places
     numeric_cols = param_table.select_dtypes(include=["float","int"]).columns
     param_table[numeric_cols] = param_table[numeric_cols].astype(float).round(2)
 
@@ -226,30 +232,17 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
     st.dataframe(param_table.style.format("{:.2f}"))
 
     # -------------------------------
-    # Planned Orders Table
+    # Planned Orders
     # -------------------------------
     planned_df = debug_df[debug_df["Planned_Order"] > 0].copy()
 
     if planned_df.empty:
         st.warning("No upcoming planned orders.")
     else:
-        planned_df["receipt_week"] = planned_df["week"]
-        planned_df["release_week"] = planned_df["receipt_week"] - \
-            pd.to_timedelta(planned_df["warehouse"].map(
-                lambda x: items_dict[(x, planned_df.loc[planned_df["warehouse"]==x, "item"].iloc[0])]["lead_time"]
-            ), unit="W")
-
-        planned_df = planned_df[[
-            "warehouse","item","description","uom",
-            "Planned_Order","receipt_week"
-        ]]
-
         planned_df.rename(columns={"Planned_Order":"planned_qty"}, inplace=True)
-
         st.subheader("Upcoming Planned Orders")
         st.dataframe(planned_df.style.format({"planned_qty":"{:.2f}"}))
 
-        # Excel Download
         output = io.BytesIO()
         planned_df.to_excel(output, index=False, engine="openpyxl")
         output.seek(0)
