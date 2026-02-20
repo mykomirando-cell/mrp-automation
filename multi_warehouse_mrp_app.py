@@ -27,44 +27,44 @@ if inventory_file and issuance_file and receipts_file and item_master_file:
     # -------------------------------
 # ROBUST FILE LOADER (Cloud Safe)
 # -------------------------------
-def load_file(f):
+    def load_file(f):
 
-    # Excel Files
-    if f.name.lower().endswith(".xlsx"):
-        return pd.read_excel(f)
+        # Excel Files
+        if f.name.lower().endswith(".xlsx"):
+            return pd.read_excel(f)
 
-    # CSV Files (handles UTF-8 / ANSI / ERP exports)
-    elif f.name.lower().endswith(".csv"):
+        # CSV Files (handles UTF-8 / ANSI / ERP exports)
+        elif f.name.lower().endswith(".csv"):
 
-        try:
-            return pd.read_csv(f, encoding="utf-8")
-
-        except UnicodeDecodeError:
             try:
-                return pd.read_csv(f, encoding="utf-8-sig")
+                return pd.read_csv(f, encoding="utf-8")
 
             except UnicodeDecodeError:
                 try:
-                    return pd.read_csv(f, encoding="latin1")
+                    return pd.read_csv(f, encoding="utf-8-sig")
 
-                except Exception:
-                    st.error(f"Unable to read CSV file: {f.name}")
-                    st.stop()
+                except UnicodeDecodeError:
+                    try:
+                        return pd.read_csv(f, encoding="latin1")
 
-    else:
-        st.error(f"Unsupported file type: {f.name}")
-        st.stop()
+                    except Exception:
+                        st.error(f"Unable to read CSV file: {f.name}")
+                        st.stop()
 
-    inventory = load_file(inventory_file)
-    issuance = load_file(issuance_file)
-    receipts = load_file(receipts_file)
-    items = load_file(item_master_file)
+        else:
+            st.error(f"Unsupported file type: {f.name}")
+            st.stop()
 
-    # Ensure UOM is string
-    for df in [inventory, issuance, receipts, items]:
-        df["uom"] = df["uom"].astype(str)
+        inventory = load_file(inventory_file)
+        issuance = load_file(issuance_file)
+        receipts = load_file(receipts_file)
+        items = load_file(item_master_file)
 
-    st.success("Files loaded successfully!")
+        # Ensure UOM is string
+        for df in [inventory, issuance, receipts, items]:
+            df["uom"] = df["uom"].astype(str)
+
+        st.success("Files loaded successfully!")
 
     # -------------------------------
     # 2️⃣ UOM Consistency Check
@@ -263,3 +263,4 @@ def load_file(f):
             file_name="planned_orders.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
+
