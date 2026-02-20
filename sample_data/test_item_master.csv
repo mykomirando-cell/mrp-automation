@@ -1,0 +1,13 @@
+warehouse,item_id,description,uom,lead_time,safety_stock,MOQ,pack_size,min_days,reorder_point_days,max_days
+WH1,FG1,Desc_FG1,pc,2,7,6,3,7,14,21
+WH1,FG2,Desc_FG2,pc,2,7,9,3,7,14,28
+WH1,SUB1,Desc_SUB1,pc,2,7,12,3,7,7,21
+WH1,SUB2,Desc_SUB2,pc,2,7,15,3,7,14,21
+WH1,RM1,Desc_RM1,pc,2,7,6,3,7,7,21
+WH1,RM2,Desc_RM2,pc,2,7,9,3,7,14,21
+WH2,FG1,Desc_FG1,pc,2,7,12,3,7,14,21
+WH2,FG2,Desc_FG2,pc,2,7,15,3,7,14,28
+WH2,SUB1,Desc_SUB1,pc,2,7,6,3,7,7,21
+WH2,SUB2,Desc_SUB2,pc,2,7,9,3,7,14,21
+WH2,RM1,Desc_RM1,pc,2,7,12,3,7,7,21
+WH2,RM2,Desc_RM2,pc,2,7,15,3,7,14,21

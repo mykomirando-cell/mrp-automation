@@ -1,0 +1,13 @@
+warehouse,item_id,description,uom,on_hand_qty
+WH1,FG1,Desc_FG1,pc,7
+WH1,FG2,Desc_FG2,pc,4
+WH1,SUB1,Desc_SUB1,pc,5
+WH1,SUB2,Desc_SUB2,pc,6
+WH1,RM1,Desc_RM1,pc,3
+WH1,RM2,Desc_RM2,pc,2
+WH2,FG1,Desc_FG1,pc,1
+WH2,FG2,Desc_FG2,pc,7
+WH2,SUB1,Desc_SUB1,pc,9
+WH2,SUB2,Desc_SUB2,pc,3
+WH2,RM1,Desc_RM1,pc,6
+WH2,RM2,Desc_RM2,pc,2

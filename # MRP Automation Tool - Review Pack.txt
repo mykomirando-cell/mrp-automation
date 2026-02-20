@@ -1,0 +1,45 @@
+# MRP Automation Tool - Review Package
+
+## Overview
+This Streamlit app computes **Material Requirements Planning (MRP)** for multiple warehouses and items.
+
+Features included:
+- Warehouse-specific MRP calculations
+- Beginning and ending stock, weekly requirements
+- Planned orders computation
+- DTL (Days to Last) calculation and conditional formatting
+- Description column included for clarity
+- Numeric week values rounded to 2 decimals
+
+## Input Files
+All files must be uploaded via the Streamlit interface.
+
+1. **Inventory.xlsx / .csv**
+   - Columns: warehouse, item_id, on_hand_qty, uom
+
+2. **Historical Weekly Issuance.xlsx / .csv**
+   - Columns: warehouse, item_id, week_start (date), issued_qty, uom
+
+3. **Scheduled Receipts.xlsx / .csv**
+   - Columns: warehouse, item_id, week_start (date), qty, uom
+
+4. **Item Master.xlsx / .csv**
+   - Columns: warehouse, item_id, description, safety_stock, lead_time, MOQ, pack_size, uom
+
+> Make sure the Item Master includes all required columns and no duplicates per warehouse-item combination.
+
+## How It Works
+1. **Upload input files** in the Streamlit interface.
+2. **MRP calculation**:
+   - Projected weekly demand is the latest 4-week historical average.
+   - Planned orders are calculated to cover shortages and MOQ/pack size rules.
+   - DTL = (End_SOH / avg_4wk_demand) * 7
+3. **Tables Generated**:
+   - **MRP Logic Table**: parameter vs. week, includes DTL with red highlight if <7 days.
+   - **Upcoming Planned Orders Table**: sorted by release week, includes description.
+
+## Notes for Review
+- Verify first weeks’ DTL and planned orders.
+- Check that `description` appears correctly in all tables.
+- Ensure conditional formatting for DTL <7 works as expected.
+- The app currently supports 12 weeks by default; adjust `num_weeks` in the script to test longer horizons.
