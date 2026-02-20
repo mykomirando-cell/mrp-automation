@@ -8,27 +8,55 @@ st.set_page_config(layout="wide")
 st.title("Material Requirement Planning Automation")
 
 # -------------------------------
-# ROBUST FILE LOADER (Cloud Safe)
+# ERP SAFE FILE LOADER (CLOUD SAFE)
 # -------------------------------
 def load_file(f):
 
-    if f.name.lower().endswith(".xlsx"):
-        return pd.read_excel(f)
+    try:
 
-    elif f.name.lower().endswith(".csv"):
-        try:
-            return pd.read_csv(f, encoding="utf-8")
-        except UnicodeDecodeError:
-            try:
-                return pd.read_csv(f, encoding="utf-8-sig")
-            except:
-                return pd.read_csv(f, encoding="latin1")
-    else:
-        st.error(f"Unsupported file type: {f.name}")
+        if f.name.lower().endswith(".xlsx"):
+            return pd.read_excel(io.BytesIO(f.getvalue()))
+
+        elif f.name.lower().endswith(".csv"):
+
+            raw = f.getvalue()
+
+            encodings = ["utf-8","utf-8-sig","cp1252","latin1"]
+            separators = [",",";","\t","|"]
+
+            for enc in encodings:
+                for sep in separators:
+                    try:
+                        df = pd.read_csv(
+                            io.BytesIO(raw),
+                            encoding=enc,
+                            sep=sep,
+                            engine="python"
+                        )
+                        if df.shape[1] > 1:
+                            return df
+                    except:
+                        continue
+
+            st.error(f"""
+Unable to parse CSV: {f.name}
+
+Re-export as:
+CSV UTF-8 (Comma Delimited)
+""")
+            st.stop()
+
+        else:
+            st.error(f"Unsupported file type: {f.name}")
+            st.stop()
+
+    except Exception as e:
+        st.error(f"File load failed: {f.name}")
+        st.exception(e)
         st.stop()
 
 # -------------------------------
-# 1️⃣ Upload Input Files
+# Upload Input Files
 # -------------------------------
 st.header("Upload Input Files")
 
@@ -66,7 +94,7 @@ receipts["week_start"] = pd.to_datetime(receipts["week_start"])
 st.success("Files loaded successfully!")
 
 # -------------------------------
-# 2️⃣ SAFE UOM Consistency Check
+# UOM Consistency Check
 # -------------------------------
 uom_errors = []
 
@@ -99,7 +127,7 @@ if uom_errors:
     st.stop()
 
 # -------------------------------
-# 3️⃣ Item Master Validation
+# Item Master Validation
 # -------------------------------
 required_cols = ["warehouse","item_id","description","safety_stock","lead_time","MOQ","pack_size","uom"]
 missing = [c for c in required_cols if c not in items.columns]
@@ -118,7 +146,7 @@ items_dict = items.set_index(["warehouse","item_id"]).to_dict("index")
 warehouses = inventory["warehouse"].unique()
 
 # -------------------------------
-# 4️⃣ Planning Weeks (Always Monday)
+# Planning Weeks (Always Monday)
 # -------------------------------
 today = pd.to_datetime(date.today())
 year_start = pd.to_datetime(f"{today.year}-01-01")
@@ -129,7 +157,7 @@ last_monday = pd.to_datetime(f"{today.year}-12-31") - pd.Timedelta(days=pd.to_da
 time_buckets = pd.date_range(start=first_monday,end=last_monday,freq="W-MON")
 
 # -------------------------------
-# 5️⃣ MRP ENGINE
+# MRP ENGINE
 # -------------------------------
 debug_rows = []
 
@@ -188,7 +216,7 @@ for wh in warehouses:
 debug_df = pd.DataFrame(debug_rows)
 
 # -------------------------------
-# 6️⃣ Planned Orders
+# Planned Orders
 # -------------------------------
 planned_rows = []
 
