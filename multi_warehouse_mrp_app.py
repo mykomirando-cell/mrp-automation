@@ -1,142 +1,186 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+from datetime import timedelta, date
+import io
 
-st.set_page_config(page_title="Multi-Warehouse MRP", layout="wide")
-
-st.title("📦 Multi-Warehouse MRP Planning Tool")
-
-# -------------------------------
-# File Upload Section
-# -------------------------------
-
-st.sidebar.header("Upload Required Files")
-
-item_file = st.sidebar.file_uploader("Upload Item Master", type=["xlsx", "csv"])
-demand_file = st.sidebar.file_uploader("Upload Demand Forecast", type=["xlsx", "csv"])
-inventory_file = st.sidebar.file_uploader("Upload Inventory On Hand", type=["xlsx", "csv"])
+st.set_page_config(layout="wide")
+st.title("Material Requirement Planning Automation")
 
 # -------------------------------
-# Helper Functions
+# Helper: Clean Columns
 # -------------------------------
-
-def load_file(file):
-    if file.name.endswith(".csv"):
-        return pd.read_csv(file)
-    else:
-        return pd.read_excel(file)
-
 def clean_columns(df):
-    df.columns = df.columns.str.strip()
+    df.columns = df.columns.str.strip().str.lower().str.replace(" ", "_")
     return df
 
 def clean_numeric(df, columns):
     for col in columns:
         if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
     return df
 
 # -------------------------------
-# Main Logic
+# Upload Input Files
 # -------------------------------
+st.header("Upload Input Files")
 
-if item_file and demand_file and inventory_file:
+col1, col2, col3, col4 = st.columns(4)
+with col1:
+    inventory_file = st.file_uploader("Inventory On Hand", type=["csv", "xlsx"])
+with col2:
+    issuance_file = st.file_uploader("Historical Weekly Issuance", type=["csv", "xlsx"])
+with col3:
+    receipts_file = st.file_uploader("Scheduled Receipts", type=["csv", "xlsx"])
+with col4:
+    item_master_file = st.file_uploader("Item Master", type=["csv", "xlsx"])
 
-    # Load files
-    item_master = clean_columns(load_file(item_file))
-    demand = clean_columns(load_file(demand_file))
+if inventory_file and issuance_file and receipts_file and item_master_file:
+
+    # -------------------------------
+    # Load Files
+    # -------------------------------
+    def load_file(f):
+        if f.name.lower().endswith(".xlsx"):
+            return pd.read_excel(f)
+        else:
+            try:
+                return pd.read_csv(f, encoding="utf-8")
+            except:
+                return pd.read_csv(f, encoding="latin1")
+
     inventory = clean_columns(load_file(inventory_file))
+    issuance = clean_columns(load_file(issuance_file))
+    receipts = clean_columns(load_file(receipts_file))
+    items = clean_columns(load_file(item_master_file))
 
-    # Required columns
-    required_item_cols = [
-        "warehouse",
-        "item_id",
-        "description",
-        "uom",
-        "lead_time",
-        "safety_stock",
-        "MOQ",
-        "pack_size"
-    ]
+    # -------------------------------
+    # Clean numeric columns
+    # -------------------------------
+    inventory = clean_numeric(inventory, ["on_hand_qty"])
+    issuance = clean_numeric(issuance, ["issued_qty"])
+    receipts = clean_numeric(receipts, ["qty"])
+    items = clean_numeric(items, ["safety_stock", "lead_time", "moq", "pack_size"])
 
-    missing_cols = [col for col in required_item_cols if col not in item_master.columns]
+    # Ensure UOM is string
+    for df in [inventory, issuance, receipts, items]:
+        if "uom" in df.columns:
+            df["uom"] = df["uom"].astype(str)
 
-    if missing_cols:
-        st.error(f"Missing required columns in Item Master: {missing_cols}")
+    st.success("Files loaded successfully!")
+
+    # -------------------------------
+    # Validate Item Master
+    # -------------------------------
+    required_cols = ["warehouse","item_id","description","safety_stock","lead_time","moq","pack_size","uom"]
+    missing = [c for c in required_cols if c not in items.columns]
+    if missing:
+        st.error(f"Missing required columns in Item Master: {missing}")
         st.stop()
 
-    # Clean numeric columns safely
-    numeric_cols = ["lead_time", "safety_stock", "MOQ", "pack_size"]
-    item_master = clean_numeric(item_master, numeric_cols)
+    dupes = items[items.duplicated(subset=["warehouse","item_id"], keep=False)]
+    if not dupes.empty:
+        st.error("Duplicate warehouse-item combinations found.")
+        st.dataframe(dupes)
+        st.stop()
 
-    # Clean demand + inventory
-    demand = clean_numeric(demand, ["forecast_qty"])
-    inventory = clean_numeric(inventory, ["on_hand_qty"])
+    items_dict = items.set_index(["warehouse","item_id"]).to_dict("index")
 
     # -------------------------------
-    # Merge Data
+    # Date Conversion
     # -------------------------------
+    for df in [issuance, receipts]:
+        if "week_start" in df.columns:
+            df["week_start"] = pd.to_datetime(df["week_start"], errors='coerce')
 
-    param_table = (
-        item_master
-        .merge(demand, on=["warehouse", "item_id"], how="left")
-        .merge(inventory, on=["warehouse", "item_id"], how="left")
-    )
+    # -------------------------------
+    # Planning Horizon
+    # -------------------------------
+    today = pd.to_datetime(date.today())
+    today_monday = today - pd.Timedelta(days=today.weekday())
+    num_weeks = 12
+    time_buckets = [today_monday + timedelta(weeks=w) for w in range(num_weeks)]
 
-    param_table["forecast_qty"] = param_table["forecast_qty"].fillna(0)
-    param_table["on_hand_qty"] = param_table["on_hand_qty"].fillna(0)
+    # -------------------------------
+    # Pre-group Data for Performance
+    # -------------------------------
+    issuance_grouped = issuance.groupby(["warehouse","item_id"])["issued_qty"].apply(list).to_dict()
+    receipts_grouped = receipts.groupby(["warehouse","item_id","week_start"])["qty"].sum().to_dict()
+    inventory_grouped = inventory.groupby(["warehouse","item_id"])["on_hand_qty"].sum().to_dict()
 
     # -------------------------------
     # MRP Logic
     # -------------------------------
+    debug_rows = []
 
-    param_table["net_requirement"] = (
-        param_table["forecast_qty"]
-        + param_table["safety_stock"]
-        - param_table["on_hand_qty"]
-    )
+    for (wh, item), params in items_dict.items():
+        previous_s = float(inventory_grouped.get((wh,item), 0))
+        safety_stock = float(params.get("safety_stock", 0))
+        lead_time = int(params.get("lead_time", 1))
+        moq = int(params.get("moq", 1))
+        pack_size = int(params.get("pack_size", 1))
+        description = params.get("description", "")
+        uom = params.get("uom", "")
 
-    param_table["net_requirement"] = param_table["net_requirement"].apply(
-        lambda x: max(x, 0)
-    )
+        issued_list = issuance_grouped.get((wh, item), [])
+        avg_demand = np.mean(issued_list[-4:]) if len(issued_list) > 0 else 1
+        avg_demand = max(float(avg_demand), 1)  # ensures weekly requirement never zero
 
-    # Apply MOQ
-    param_table["planned_order_qty"] = np.where(
-        param_table["net_requirement"] > 0,
-        np.maximum(param_table["net_requirement"], param_table["MOQ"]),
-        0
-    )
+        for bucket in time_buckets:
+            incoming_qty = float(receipts_grouped.get((wh,item,bucket), 0))
+            wkly_req = avg_demand
 
-    # Apply pack size rounding
-    param_table["planned_order_qty"] = np.where(
-        param_table["planned_order_qty"] > 0,
-        np.ceil(param_table["planned_order_qty"] / param_table["pack_size"]) * param_table["pack_size"],
-        0
-    )
+            end_s = previous_s - wkly_req + incoming_qty
+            shortage = max(safety_stock - end_s, 0)
+            planned_qty = 0
+
+            if shortage > 0:
+                planned_qty = max(shortage, moq)
+                if pack_size > 0:
+                    planned_qty = np.ceil(planned_qty / pack_size) * pack_size
+                end_s += planned_qty
+
+            debug_rows.append({
+                "warehouse": wh,
+                "item": item,
+                "description": description,
+                "uom": uom,
+                "week": bucket,
+                "Beg_SOH": previous_s,
+                "Wkly_Req": wkly_req,
+                "Incoming": incoming_qty,
+                "Planned_Order": planned_qty,
+                "End_SOH": end_s
+            })
+
+            previous_s = end_s
+
+    debug_df = pd.DataFrame(debug_rows)
 
     # -------------------------------
-    # Display Results (SAFE VERSION)
+    # Display Parameter Table
     # -------------------------------
-
     st.subheader("MRP Logic Table")
-    st.dataframe(param_table)
+    st.dataframe(debug_df)
 
     # -------------------------------
-    # Planned Orders Summary
+    # Planned Orders Table
     # -------------------------------
+    planned_df = debug_df[debug_df["Planned_Order"] > 0].copy()
+    if not planned_df.empty:
+        planned_df.rename(columns={"Planned_Order":"planned_qty"}, inplace=True)
+        st.subheader("Upcoming Planned Orders")
+        st.dataframe(planned_df)
 
-    planned_orders = param_table[param_table["planned_order_qty"] > 0][
-        [
-            "warehouse",
-            "item_id",
-            "description",
-            "planned_order_qty",
-            "lead_time"
-        ]
-    ]
-
-    st.subheader("Planned Orders")
-    st.dataframe(planned_orders)
-
-else:
-    st.info("Please upload all three required files to run MRP.")
+        # Excel download
+        output = io.BytesIO()
+        planned_df.to_excel(output, index=False, engine='openpyxl')
+        output.seek(0)
+        st.download_button(
+            "📥 Download Planned Orders as Excel",
+            data=output,
+            file_name="planned_orders.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    else:
+        st.warning("No upcoming planned orders.")
